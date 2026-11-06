@@ -1,0 +1,318 @@
+version: 2
+
+sources:
+  - name: raw
+    description: >
+      Raw landing layer in healthcare_dbt_dw. Data is loaded exactly as delivered:
+      every column is VARCHAR and blank cells are NULL. Data types, renaming and
+      cleaning belong in the staging models, never here.
+    database: healthcare_dbt_dw
+    schema: raw
+    loader: python (pandas + pyodbc) - sql/raw_load/02c_load_encounters_python.ipynb
+
+    tables:
+      - name: encounters
+        description: >
+          One row per hospital encounter (50,000 rows), loaded from encounters_100k.csv.
+          A wide, denormalized extract that combines patient demographics, diagnosis,
+          vitals and labs, bed and OR flow, safety incidents, claims and fraud flags,
+          nurse and surgeon staffing, CAHPS patient-experience scores, surgical kit
+          inventory and HEDIS quality measures.
+          Grain: encounter_id.
+
+        columns:
+          # ---------------------------------------------------------------- keys
+          - name: encounter_id
+            description: Primary key. UUID of the hospital encounter.
+            data_tests:
+              - unique
+              - not_null
+          - name: patient_id
+            description: Patient identifier (format PAT-nnnnnnn).
+            data_tests:
+              - not_null
+          - name: claim_id
+            description: Insurance claim identifier for the encounter (format CLM-nnnnnnn). One claim per encounter.
+            data_tests:
+              - unique
+              - not_null
+
+          # ------------------------------------------------------- demographics
+          - name: birth_year
+            description: Patient year of birth.
+          - name: age
+            description: Patient age in years at the time of the encounter.
+          - name: sex
+            description: Patient sex.
+            data_tests:
+              - accepted_values:
+                  arguments:
+                    values: ['male', 'female']
+          - name: race_ethnicity
+            description: Patient race / ethnicity.
+            data_tests:
+              - accepted_values:
+                  arguments:
+                    values: ['White', 'Black', 'Hispanic', 'Asian', 'Other']
+                  config:
+                    severity: warn
+          - name: state
+            description: Two-letter US state code of the patient.
+
+          # ---------------------------------------------------------- diagnosis
+          - name: icd10_code
+            description: Primary diagnosis ICD-10-CM code.
+          - name: diagnosis_display
+            description: Human-readable description of the ICD-10 code.
+          - name: diagnosis_category
+            description: Clinical category of the diagnosis (CV, PULM, GI, ENDO, ONC, MSK, GU, DERM).
+            data_tests:
+              - accepted_values:
+                  arguments:
+                    values: ['CV', 'PULM', 'GI', 'ENDO', 'ONC', 'MSK', 'GU', 'DERM']
+                  config:
+                    severity: warn
+          - name: severity_index
+            description: Illness severity score between 0 and 1.
+          - name: comorbidity_count
+            description: Number of comorbid conditions.
+          - name: has_diabetes
+            description: 1 if the patient has diabetes, else 0.
+            data_tests: &flag_0_1
+              - accepted_values:
+                  arguments:
+                    values: ['0', '1']
+          - name: has_hypertension
+            description: 1 if the patient has hypertension, else 0.
+            data_tests: *flag_0_1
+          - name: has_chf
+            description: 1 if the patient has congestive heart failure, else 0.
+            data_tests: *flag_0_1
+
+          # ----------------------------------------------------- vitals & labs
+          - name: sbp_mmhg
+            description: Systolic blood pressure (mmHg).
+          - name: dbp_mmhg
+            description: Diastolic blood pressure (mmHg).
+          - name: heart_rate_bpm
+            description: Heart rate (beats per minute).
+          - name: spo2_pct
+            description: Oxygen saturation (%).
+          - name: temperature_f
+            description: Body temperature (degrees Fahrenheit).
+          - name: bmi
+            description: Body mass index (kg/m2).
+          - name: respiratory_rate
+            description: Respiratory rate (breaths per minute).
+          - name: hba1c_pct
+            description: Hemoglobin A1c (%).
+          - name: glucose_mg_dl
+            description: Blood glucose (mg/dL).
+          - name: creatinine_mg_dl
+            description: Serum creatinine (mg/dL).
+          - name: wbc_10e3_ul
+            description: White blood cell count (10^3 per microliter).
+          - name: nt_probnp_pg_ml
+            description: NT-proBNP heart-failure marker (pg/mL).
+          - name: medication_adherence_pdc
+            description: Medication adherence as proportion of days covered (0 to 1).
+          - name: readmission_30d_flag
+            description: 1 if the patient was readmitted within 30 days of discharge, else 0.
+            data_tests: *flag_0_1
+
+          # ------------------------------------------------- patient flow / beds
+          - name: triage_timestamp
+            description: Time the patient was triaged (ISO 8601, text).
+          - name: admit_timestamp
+            description: Time the patient was admitted (ISO 8601, text).
+          - name: bed_request_time
+            description: Time a bed was requested (ISO 8601, text).
+          - name: bed_assign_time
+            description: Time a bed was assigned (ISO 8601, text).
+          - name: unit_assigned
+            description: Hospital unit the patient was assigned to.
+            data_tests:
+              - accepted_values:
+                  arguments:
+                    values: &hospital_units ['ICU', 'MICU', 'SICU', 'Step-Down', 'Cardiac', 'Oncology', 'Ortho', 'General', 'Med-Surg A', 'Med-Surg B']
+                  config:
+                    severity: warn
+          - name: bed_occupancy_pct
+            description: Occupancy of the assigned unit at assignment time (%).
+          - name: los_days
+            description: Length of stay (days).
+          - name: discharge_timestamp
+            description: Time the patient was discharged (ISO 8601, text).
+
+          # ------------------------------------------------- procedure / OR
+          - name: cpt_code
+            description: CPT code of the main procedure.
+          - name: procedure_display
+            description: Human-readable description of the CPT code.
+          - name: or_start
+            description: Operating room start time (ISO 8601, text).
+          - name: or_end
+            description: Operating room end time (ISO 8601, text).
+          - name: actual_or_minutes
+            description: Actual operating room duration (minutes).
+          - name: or_turnover_minutes
+            description: Operating room turnover time before the next case (minutes).
+
+          # ---------------------------------------------------- patient safety
+          - name: safety_incident_flag
+            description: 1 if a patient-safety incident occurred during the encounter, else 0.
+            data_tests: *flag_0_1
+          - name: incident_type
+            description: Type of safety incident. NULL when safety_incident_flag = 0.
+            data_tests:
+              - accepted_values:
+                  arguments:
+                    values: ['Fall', 'Medication Error', 'Pressure Injury', 'CAUTI', 'CLABSI', 'SSI', 'Equipment Failure', 'Delay in Care', 'Near-Miss']
+                  config:
+                    severity: warn
+          - name: incident_severity
+            description: Severity of the safety incident. NULL when safety_incident_flag = 0.
+            data_tests:
+              - accepted_values:
+                  arguments:
+                    values: ['Near-Miss', 'Minor', 'Moderate', 'Major']
+                  config:
+                    severity: warn
+
+          # --------------------------------------------------- claims & billing
+          - name: payer
+            description: Insurance payer for the claim.
+            data_tests:
+              - accepted_values:
+                  arguments:
+                    values: ['Medicare', 'Medicaid', 'BlueCross', 'UnitedHealth', 'Cigna', 'Aetna', 'Self-Pay']
+                  config:
+                    severity: warn
+          - name: npi_billing
+            description: National Provider Identifier (NPI) of the billing provider.
+          - name: drg_weight
+            description: Diagnosis-related group (DRG) relative weight.
+          - name: submitted_charge_usd
+            description: Amount billed to the payer (USD).
+          - name: allowed_amount_usd
+            description: Amount allowed by the payer (USD).
+          - name: patient_responsibility_usd
+            description: Amount owed by the patient (USD).
+          - name: fraud_upcoding_flag
+            description: 1 if the claim is flagged for upcoding, else 0.
+            data_tests: *flag_0_1
+          - name: fraud_duplicate_flag
+            description: 1 if the claim is flagged as a duplicate, else 0.
+            data_tests: *flag_0_1
+          - name: fraud_unbundling_flag
+            description: 1 if the claim is flagged for unbundling, else 0.
+            data_tests: *flag_0_1
+
+          # ----------------------------------------------------------- staffing
+          - name: nurse_emp_id
+            description: Employee ID of the primary nurse (format NRS-nnnnn).
+          - name: nurse_role
+            description: Role of the primary nurse.
+            data_tests:
+              - accepted_values:
+                  arguments:
+                    values: ['RN', 'Charge RN', 'LPN']
+                  config:
+                    severity: warn
+          - name: nurse_unit
+            description: Home unit of the primary nurse.
+            data_tests:
+              - accepted_values:
+                  arguments:
+                    values: *hospital_units
+                  config:
+                    severity: warn
+          - name: nurse_tenure_years
+            description: Nurse tenure (years).
+          - name: nurse_fte
+            description: Nurse full-time equivalent (1.0 = full time).
+          - name: surgeon_emp_id
+            description: Employee ID of the surgeon (format SRG-nnnnn).
+          - name: surgeon_specialty
+            description: Surgical specialty of the surgeon.
+            data_tests:
+              - accepted_values:
+                  arguments:
+                    values: ['Cardiothoracic', 'General Surgery', 'Neurosurgery', 'Orthopedics', 'Urology']
+                  config:
+                    severity: warn
+          - name: shift_hours
+            description: Length of the nurse's shift (hours).
+          - name: patients_per_nurse_ratio
+            description: Number of patients assigned per nurse.
+          - name: overtime_hours
+            description: Nurse overtime hours.
+          - name: burnout_exhaustion_mbi
+            description: Maslach Burnout Inventory (MBI) emotional exhaustion score.
+          - name: burnout_cynicism_mbi
+            description: Maslach Burnout Inventory (MBI) cynicism / depersonalization score.
+          - name: burnout_personal_accomplishment_mbi
+            description: Maslach Burnout Inventory (MBI) personal accomplishment score.
+          - name: turnover_risk_index
+            description: Modeled risk that the nurse leaves (0 to 1).
+
+          # ------------------------------------------ CAHPS patient experience
+          - name: cahps_nurse_communication
+            description: CAHPS score for nurse communication.
+          - name: cahps_doctor_communication
+            description: CAHPS score for doctor communication.
+          - name: cahps_responsiveness
+            description: CAHPS score for staff responsiveness.
+          - name: cahps_pain_management
+            description: CAHPS score for pain management.
+          - name: cahps_discharge_info
+            description: CAHPS score for discharge information.
+          - name: cahps_care_transition
+            description: CAHPS score for care transition.
+          - name: cahps_cleanliness
+            description: CAHPS score for room cleanliness.
+          - name: cahps_quietness
+            description: CAHPS score for quietness at night.
+
+          # ------------------------------------------ surgical kit inventory
+          - name: surgical_kit_id
+            description: SKU of the surgical kit used (format SKU-...).
+          - name: kit_name
+            description: Short name of the surgical kit.
+          - name: kit_unit_cost_usd
+            description: Unit cost of the kit (USD).
+          - name: kit_current_stock
+            description: Kits currently in stock.
+          - name: kit_reorder_point
+            description: Stock level that triggers a reorder.
+          - name: kit_lead_time_days
+            description: Supplier lead time for the kit (days).
+          - name: kit_expiration_date
+            description: Expiration date of the kit (YYYY-MM-DD, text).
+          - name: stockout_risk_flag
+            description: 1 if the kit is at risk of a stockout, else 0.
+            data_tests: *flag_0_1
+          - name: weekly_procedure_volume
+            description: Weekly number of procedures that use this kit.
+          - name: projected_demand_4wk
+            description: Projected kit demand over the next 4 weeks.
+          - name: days_of_supply
+            description: Days of supply remaining at current usage.
+
+          # ------------------------------------------ quality & digital maturity
+          - name: hedis_hba1c_tested
+            description: HEDIS measure - 1 if HbA1c was tested, else 0.
+            data_tests: *flag_0_1
+          - name: hedis_hba1c_poor_control
+            description: HEDIS measure - 1 if HbA1c shows poor control (> 9%), else 0.
+            data_tests: *flag_0_1
+          - name: pdsa_cycle_id
+            description: Plan-Do-Study-Act quality-improvement cycle linked to the encounter. Mostly NULL.
+          - name: himss_emram_stage
+            description: HIMSS EMRAM electronic medical record adoption stage of the facility (0 to 7).
+            data_tests:
+              - accepted_values:
+                  arguments:
+                    values: ['5', '6', '7']
+                  config:
+                    severity: warn

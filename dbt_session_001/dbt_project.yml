@@ -28,4 +28,6 @@ clean-targets:         # directories to be removed by `dbt clean`
 
 models:
   dbt_session_001:
-    # Config indicated by + and applies to all files under models/example/
+    # Configs prefixed with + apply to every model in that folder
+    staging:
+      +materialized: table

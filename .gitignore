@@ -11,3 +11,6 @@ profiles.yml
 # Ignore the dbt logs
 logs/
 *.log
+
+# Ignore the sql dbt test file
+db_test.sql
