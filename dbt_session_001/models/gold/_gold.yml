@@ -1,0 +1,225 @@
+version: 2
+
+# Gold layer: aggregated, business-ready marts built only from silver.
+# Tests: grain uniqueness (unique_combination_of_columns), not_null on grain
+# columns, rate and average ranges. Totals vs silver are checked by the
+# singular tests tests/assert_gold_*.sql
+
+models:
+
+  # ======================================================================
+  - name: mart_ed_throughput_daily
+    description: >
+      ED / patient-flow throughput per admission day and hospital unit:
+      volume, door-to-admit, bed request and bed boarding times (avg and median),
+      bed occupancy.
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: ['admission_date', 'unit_name']
+    columns:
+      - name: admission_date
+        data_tests: [not_null]
+      - name: unit_name
+        description: Hospital unit where the patient was cared for.
+        data_tests: [not_null]
+      - name: encounters
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "> 0"
+      - name: median_door_to_admit_minutes
+        data_tests: &non_negative
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: ">= 0"
+      - name: median_bed_boarding_minutes
+        data_tests: *non_negative
+      - name: avg_bed_occupancy_pct
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "between 0 and 100"
+
+  # ======================================================================
+  - name: mart_unit_scorecard_monthly
+    description: >
+      Monthly scorecard per hospital unit (unit where care happened): volume,
+      safety incidents per 1,000 patient-days, 30-day readmissions, CAHPS patient
+      experience, and staffing (workload, overtime, turnover risk, burnout of the
+      distinct nurses who worked in the unit that month).
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: ['admission_month', 'unit_name']
+    columns:
+      - name: admission_month
+        data_tests: [not_null]
+      - name: unit_name
+        data_tests: [not_null]
+      - name: encounters
+        data_tests: [not_null]
+      - name: patient_days
+        description: Sum of exact length of stay, in days.
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "> 0"
+      - name: incidents_per_1000_patient_days
+        data_tests: *non_negative
+      - name: safety_incidents
+        description: Equals the sum of the four severity columns.
+        data_tests:
+          - expression_is_true:
+              arguments:
+                expression: "= incidents_major + incidents_moderate + incidents_minor + incidents_near_miss"
+      - name: readmission_rate_30d
+        data_tests: &rate_0_1
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "between 0 and 1"
+      - name: avg_cahps_composite_score
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "between 1 and 5"
+      - name: avg_turnover_risk_index
+        data_tests: *rate_0_1
+      - name: avg_nurse_burnout_exhaustion
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "between 0 and 6"
+
+  # ======================================================================
+  - name: mart_or_utilization_weekly
+    description: >
+      Operating room utilization per surgery week (Monday start) and surgeon
+      specialty: cases, OR minutes (total, avg, median), turnover, OR hours per surgeon.
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: ['surgery_week_start', 'specialty']
+    columns:
+      - name: surgery_week_start
+        data_tests: [not_null]
+      - name: specialty
+        data_tests: [not_null]
+      - name: cases
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: ">= distinct_surgeons"
+      - name: median_or_minutes
+        data_tests: *non_negative
+      - name: or_hours_per_surgeon
+        data_tests: *non_negative
+
+  # ======================================================================
+  - name: mart_revenue_cycle_monthly
+    description: >
+      Revenue cycle and fraud monitoring per claim month (discharge month) and
+      payer. is_partial_month = 1 marks months after the last admission month
+      (only spill-over discharges), which are not comparable to full months.
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: ['claim_month', 'payer']
+    columns:
+      - name: claim_month
+        data_tests: [not_null]
+      - name: is_partial_month
+        data_tests: [not_null]
+      - name: payer
+        data_tests: [not_null]
+      - name: total_payer_paid_usd
+        description: Allowed amount minus patient responsibility.
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "= total_allowed_usd - total_patient_responsibility_usd"
+      - name: allowed_to_submitted_ratio
+        data_tests: *rate_0_1
+      - name: case_mix_index
+        description: Average DRG relative weight of the claims.
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "> 0"
+      - name: upcoding_rate
+        data_tests: *rate_0_1
+      - name: duplicate_rate
+        data_tests: *rate_0_1
+      - name: unbundling_rate
+        data_tests: *rate_0_1
+      - name: flagged_claim_rate
+        data_tests: *rate_0_1
+      - name: flagged_submitted_usd
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "<= total_submitted_usd"
+
+  # ======================================================================
+  - name: mart_clinical_quality_monthly
+    description: >
+      Clinical quality per admission month and diagnosis category: 30-day
+      readmissions, severity, length of stay, and HEDIS diabetes care
+      (HbA1c testing and poor control > 9%; denominator = diabetic encounters).
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: ['admission_month', 'diagnosis_category']
+    columns:
+      - name: admission_month
+        data_tests: [not_null]
+      - name: diagnosis_category
+        data_tests: [not_null]
+      - name: readmission_rate_30d
+        data_tests: *rate_0_1
+      - name: hba1c_testing_rate
+        description: NULL when the group has no diabetic encounters.
+        data_tests:
+          - expression_is_true:
+              arguments:
+                expression: "between 0 and 1"
+      - name: hba1c_poor_control_rate
+        description: NULL when the group has no diabetic encounters.
+        data_tests:
+          - expression_is_true:
+              arguments:
+                expression: "between 0 and 1"
+      - name: hba1c_poor_control
+        data_tests:
+          - expression_is_true:
+              arguments:
+                expression: "<= hba1c_tested"
+
+  # ======================================================================
+  - name: mart_kit_stockout_status
+    description: >
+      Current status of each surgical kit, from its latest stock reading:
+      stock vs reorder point, days of supply vs supplier lead time,
+      stock value and expiry.
+    columns:
+      - name: surgical_kit_id
+        description: One row per kit.
+        data_tests: [unique, not_null]
+      - name: latest_reading_at
+        data_tests: [not_null]
+      - name: runs_out_before_resupply
+        description: 1 when days of supply is shorter than the supplier lead time.
+        data_tests: [not_null]
+      - name: stock_value_usd
+        data_tests: *non_negative

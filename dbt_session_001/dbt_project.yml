@@ -31,3 +31,9 @@ models:
     # Configs prefixed with + apply to every model in that folder
     staging:
       +materialized: table
+    silver:
+      +materialized: table
+      +schema: silver        # dbt builds this as <target schema>_silver, e.g. dev_silver
+    gold:
+      +materialized: table
+      +schema: gold          # -> dev_gold
