@@ -1,0 +1,8 @@
+[0m17:41:33.310069 [debug] [MainThread]: Sending event: {'category': 'dbt', 'action': 'invocation', 'label': 'start', 'context': [<snowplow_tracker.self_describing_json.SelfDescribingJson object at 0x00000209B502D2E0>, <snowplow_tracker.self_describing_json.SelfDescribingJson object at 0x00000209B9704830>, <snowplow_tracker.self_describing_json.SelfDescribingJson object at 0x00000209B597FBC0>]}
+
+
+============================== 17:41:33.324205 | 1a034877-f13a-42e9-8fa2-bd76122ee33d ==============================
+[0m17:41:33.324205 [info ] [MainThread]: Running with dbt=1.12.6
+[0m17:41:33.325945 [debug] [MainThread]: running dbt with arguments {'version_check': 'True', 'no_print': 'None', 'static_parser': 'True', 'target_path': 'None', 'warn_error_options': 'WarnErrorOptionsV2(error=[], warn=[], silence=[])', 'maximum_seed_size_mib': '1', 'printer_width': '80', 'write_json': 'True', 'empty': 'None', 'log_cache_events': 'False', 'introspect': 'True', 'cache_selected_only': 'False', 'fail_fast': 'False', 'debug': 'False', 'log_format': 'default', 'profiles_dir': 'C:\\Users\\waleed\\.dbt', 'send_anonymous_usage_stats': 'True', 'quiet': 'False', 'warn_error': 'None', 'partial_parse': 'True', 'use_colors': 'True', 'hints_enabled': 'True', 'indirect_selection': 'eager', 'use_experimental_parser': 'False', 'invocation_command': 'dbt init dbt_session_001', 'log_path': 'logs'}
+[0m17:41:33.360502 [debug] [MainThread]: Starter project path: C:\Users\waleed\Documents\dbt_S1\.venv-dbt-s1\Lib\site-packages\dbt\include\starter_project
+[0m17:41:33.387119 [info ] [MainThread]: Setting up your profile.

@@ -1,0 +1,6 @@
+# Ignore the venv folder
+.venv-dbt-s1
+
+# Ignore the profiles.yml file
+profiles.yml
+.user.yml
