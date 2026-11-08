@@ -1,0 +1,240 @@
+version: 2
+
+# Silver layer: star schema built from stg_encounters.
+#   Dimensions : one row per business entity (natural keys)
+#   Facts      : one row per event, with foreign keys to the dimensions
+# Tests: primary keys (unique + not_null), foreign keys (relationships),
+#        derived-field ranges. Fact row counts vs staging are checked in
+#        tests/assert_silver_facts_match_staging_row_count.sql
+
+models:
+
+  # ======================================================================
+  # Dimensions
+  # ======================================================================
+  - name: dim_patient
+    description: One row per patient. Demographics and age band.
+    columns:
+      - name: patient_id
+        description: Primary key.
+        data_tests: [unique, not_null]
+      - name: age_band
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['18-34', '35-49', '50-64', '65-79', '80+']
+
+  - name: dim_nurse
+    description: >
+      One row per nurse with stable attributes (role, unit, tenure, FTE, burnout).
+      Shift-level values live in fct_encounters.
+    columns:
+      - name: nurse_emp_id
+        description: Primary key.
+        data_tests: [unique, not_null]
+
+  - name: dim_surgeon
+    description: One row per surgeon.
+    columns:
+      - name: surgeon_emp_id
+        description: Primary key.
+        data_tests: [unique, not_null]
+
+  - name: dim_diagnosis
+    description: One row per ICD-10 diagnosis code.
+    columns:
+      - name: icd10_code
+        description: Primary key.
+        data_tests: [unique, not_null]
+
+  - name: dim_procedure
+    description: One row per CPT procedure code, with the surgical kit it uses.
+    columns:
+      - name: cpt_code
+        description: Primary key.
+        data_tests: [unique, not_null]
+      - name: surgical_kit_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_surgical_kit')
+                field: surgical_kit_id
+
+  - name: dim_surgical_kit
+    description: One row per surgical kit (catalog attributes only).
+    columns:
+      - name: surgical_kit_id
+        description: Primary key.
+        data_tests: [unique, not_null]
+
+  - name: dim_date
+    description: One row per calendar day, 2024-01-01 to 2026-12-31.
+    columns:
+      - name: date_day
+        description: Primary key.
+        data_tests: [unique, not_null]
+      - name: day_of_week_iso
+        description: 1 = Monday ... 7 = Sunday.
+        data_tests:
+          - expression_is_true:
+              arguments:
+                expression: "between 1 and 7"
+
+  # ======================================================================
+  # Facts
+  # ======================================================================
+  - name: fct_encounters
+    description: >
+      One row per hospital encounter: patient flow, OR, clinical state, safety,
+      patient experience and quality measures. Rows where the OR ends after
+      discharge are kept and flagged with has_timeline_conflict = 1.
+    columns:
+      - name: encounter_id
+        description: Primary key.
+        data_tests: [unique, not_null]
+
+      # ---- foreign keys
+      - name: patient_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments: {to: ref('dim_patient'), field: patient_id}
+      - name: nurse_emp_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments: {to: ref('dim_nurse'), field: nurse_emp_id}
+      - name: surgeon_emp_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments: {to: ref('dim_surgeon'), field: surgeon_emp_id}
+      - name: icd10_code
+        data_tests:
+          - not_null
+          - relationships:
+              arguments: {to: ref('dim_diagnosis'), field: icd10_code}
+      - name: cpt_code
+        data_tests:
+          - not_null
+          - relationships:
+              arguments: {to: ref('dim_procedure'), field: cpt_code}
+      - name: admitted_date
+        data_tests:
+          - not_null
+          - relationships:
+              arguments: {to: ref('dim_date'), field: date_day}
+      - name: discharged_date
+        data_tests:
+          - not_null
+          - relationships:
+              arguments: {to: ref('dim_date'), field: date_day}
+
+      # ---- derived fields
+      - name: door_to_admit_minutes
+        description: Minutes from triage to admission.
+        data_tests: &non_negative
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: ">= 0"
+      - name: admit_to_bed_request_minutes
+        description: Minutes from admission to bed request.
+        data_tests: *non_negative
+      - name: bed_boarding_minutes
+        description: Minutes from bed request to bed assignment.
+        data_tests: *non_negative
+      - name: los_hours
+        description: Exact length of stay in hours.
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "> 0"
+      - name: has_timeline_conflict
+        description: 1 when the OR ends after discharge (known data issue), else 0.
+        data_tests: [not_null]
+      - name: cahps_composite_score
+        description: Average of the 8 CAHPS scores.
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "between 1 and 5"
+
+  - name: fct_claims
+    description: One row per insurance claim (one claim per encounter).
+    columns:
+      - name: claim_id
+        description: Primary key.
+        data_tests: [unique, not_null]
+
+      # ---- foreign keys
+      - name: encounter_id
+        data_tests:
+          - unique
+          - not_null
+          - relationships:
+              arguments: {to: ref('fct_encounters'), field: encounter_id}
+      - name: patient_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments: {to: ref('dim_patient'), field: patient_id}
+      - name: claim_date
+        description: Discharge date of the encounter.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments: {to: ref('dim_date'), field: date_day}
+
+      # ---- derived fields
+      - name: payer_paid_usd
+        description: Allowed amount minus patient responsibility.
+        data_tests: *non_negative
+      - name: allowed_to_submitted_ratio
+        description: Allowed amount / submitted charge.
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "between 0 and 1"
+      - name: fraud_flag_count
+        description: Number of fraud flags raised on the claim (0-3).
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "between 0 and 3"
+      - name: has_any_fraud_flag
+        data_tests: [not_null]
+
+  - name: fct_kit_inventory
+    description: >
+      One row per surgical kit stock reading, taken at surgery time.
+      Not a daily snapshot: use the latest reading for a kit's current status.
+    columns:
+      - name: encounter_id
+        description: Primary key (the surgery at which the reading was taken).
+        data_tests:
+          - unique
+          - not_null
+          - relationships:
+              arguments: {to: ref('fct_encounters'), field: encounter_id}
+      - name: surgical_kit_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments: {to: ref('dim_surgical_kit'), field: surgical_kit_id}
+      - name: reading_date
+        data_tests:
+          - not_null
+          - relationships:
+              arguments: {to: ref('dim_date'), field: date_day}
+      - name: kit_expiration_date
+        data_tests:
+          - not_null
+          - relationships:
+              arguments: {to: ref('dim_date'), field: date_day}

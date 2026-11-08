@@ -1,0 +1,587 @@
+version: 2
+
+# Tests for the staging layer of the encounters dataset.
+#   - Column tests : not_null, unique, accepted_values, valid ranges, ID formats
+#   - Business rules: model-level expression_is_true tests (cross-column logic)
+# The custom generic test expression_is_true lives in tests/generic/.
+#
+# Severity: error = data is wrong and must be fixed;
+#           warn  = suspicious or new values worth reviewing, the build still passes.
+
+models:
+  - name: stg_encounters
+    description: Cleaned and typed hospital encounters. One row per encounter_id.
+
+    # ======================================================================
+    # Business rules (cross-column)
+    # ======================================================================
+    data_tests:
+
+      # ---- patient timeline: triage -> admit -> bed request -> bed assign -> discharge
+      - expression_is_true:
+          name: assert_triage_before_admission
+          arguments:
+            expression: "triaged_at <= admitted_at"
+      - expression_is_true:
+          name: assert_bed_requested_after_admission
+          arguments:
+            expression: "bed_requested_at >= admitted_at"
+      - expression_is_true:
+          name: assert_bed_assigned_after_request
+          arguments:
+            expression: "bed_assigned_at >= bed_requested_at"
+      - expression_is_true:
+          name: assert_admission_before_discharge
+          arguments:
+            expression: "admitted_at < discharged_at"
+
+      # ---- operating room timeline
+      - expression_is_true:
+          name: assert_or_start_before_or_end
+          arguments:
+            expression: "or_started_at < or_ended_at"
+      - expression_is_true:
+          name: assert_or_starts_after_admission
+          arguments:
+            expression: "or_started_at >= admitted_at"
+      # Known issue: 237 one-day stays have surgery recorded after discharge.
+      - expression_is_true:
+          name: assert_or_ends_before_discharge
+          arguments:
+            expression: "or_ended_at <= discharged_at"
+          config:
+            severity: warn
+
+      # ---- derived values must agree with their source columns
+      - expression_is_true:
+          name: assert_or_minutes_match_or_times
+          arguments:
+            expression: "actual_or_minutes = datediff(minute, or_started_at, or_ended_at)"
+      - expression_is_true:
+          name: assert_los_days_matches_stay_length
+          arguments:
+            expression: "abs(datediff(minute, admitted_at, discharged_at) / 1440.0 - los_days) <= 1"
+      - expression_is_true:
+          name: assert_age_matches_birth_year
+          arguments:
+            expression: "age between year(admitted_at) - birth_year - 1 and year(admitted_at) - birth_year"
+
+      # ---- claims & billing
+      - expression_is_true:
+          name: assert_allowed_not_above_submitted
+          arguments:
+            expression: "allowed_amount_usd <= submitted_charge_usd"
+      - expression_is_true:
+          name: assert_patient_share_not_above_allowed
+          arguments:
+            expression: "patient_responsibility_usd <= allowed_amount_usd"
+
+      # ---- patient safety: incident details exist only when an incident happened
+      - expression_is_true:
+          name: assert_incident_details_match_flag
+          arguments:
+            expression: >-
+              (has_safety_incident = 1 and incident_type is not null and incident_severity is not null)
+              or (has_safety_incident = 0 and incident_type is null and incident_severity is null)
+
+      # ---- HEDIS diabetes care (HbA1c)
+      - expression_is_true:
+          name: assert_hba1c_tested_only_for_diabetics
+          arguments:
+            expression: "is_hedis_hba1c_tested = 0 or has_diabetes = 1"
+      - expression_is_true:
+          name: assert_hba1c_poor_control_means_tested_and_above_9
+          arguments:
+            expression: >-
+              is_hedis_hba1c_poor_control =
+              case when is_hedis_hba1c_tested = 1 and hba1c_pct > 9 then 1 else 0 end
+
+      # ---- surgical kit inventory
+      - expression_is_true:
+          name: assert_stockout_flag_matches_reorder_point
+          arguments:
+            expression: >-
+              is_stockout_risk =
+              case when kit_current_stock <= kit_reorder_point then 1 else 0 end
+      - expression_is_true:
+          name: assert_4wk_demand_is_4x_weekly_volume
+          arguments:
+            expression: "projected_demand_4wk = weekly_procedure_volume * 4"
+      - expression_is_true:
+          name: assert_kit_not_expired_at_surgery
+          arguments:
+            expression: "kit_expiration_date >= cast(or_started_at as date)"
+
+    # ======================================================================
+    # Column tests
+    # Flags are BIT columns, so only 0/1 are possible: not_null is enough.
+    # Ranges are plausibility limits, not the current min/max of the data.
+    # ======================================================================
+    columns:
+
+      # ---------------------------------------------------------------- keys
+      - name: encounter_id
+        description: Primary key of the encounter.
+        data_tests:
+          - unique
+          - not_null
+      - name: patient_id
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "like 'PAT-[0-9]%'"
+      - name: claim_id
+        data_tests:
+          - unique
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "like 'CLM-[0-9]%'"
+
+      # ------------------------------------------------------- demographics
+      - name: birth_year
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: ">= 1900"
+      - name: age
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "between 0 and 120"
+      - name: sex
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['male', 'female']
+      - name: race_ethnicity
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['White', 'Black', 'Hispanic', 'Asian', 'Other']
+              config:
+                severity: warn
+      - name: patient_state
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "not like '%[^A-Z]%'"
+
+      # ---------------------------------------------------------- diagnosis
+      - name: icd10_code
+        data_tests: [not_null]
+      - name: diagnosis_display
+        data_tests: [not_null]
+      - name: diagnosis_category
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['CV', 'PULM', 'GI', 'ENDO', 'ONC', 'MSK', 'GU', 'DERM']
+              config:
+                severity: warn
+      - name: severity_index
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "between 0 and 1"
+      - name: comorbidity_count
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: ">= 0"
+      - name: has_diabetes
+        data_tests: [not_null]
+      - name: has_hypertension
+        data_tests: [not_null]
+      - name: has_chf
+        data_tests: [not_null]
+
+      # ---------------------------------- vitals (clinical plausibility: warn)
+      - name: sbp_mmhg
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "between 50 and 300"
+              config:
+                severity: warn
+      - name: dbp_mmhg
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "between 20 and 200"
+              config:
+                severity: warn
+      - name: heart_rate_bpm
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "between 20 and 250"
+              config:
+                severity: warn
+      - name: spo2_pct
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "between 0 and 100"
+      - name: temperature_f
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "between 90 and 110"
+              config:
+                severity: warn
+      - name: bmi
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "between 10 and 80"
+              config:
+                severity: warn
+      - name: respiratory_rate
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "between 4 and 60"
+              config:
+                severity: warn
+
+      # ------------------------------------ labs (clinical plausibility: warn)
+      - name: hba1c_pct
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "between 3 and 20"
+              config:
+                severity: warn
+      - name: glucose_mg_dl
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "between 20 and 1000"
+              config:
+                severity: warn
+      - name: creatinine_mg_dl
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "between 0.1 and 20"
+              config:
+                severity: warn
+      - name: wbc_10e3_ul
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "between 0 and 100"
+              config:
+                severity: warn
+      - name: nt_probnp_pg_ml
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: ">= 0"
+      - name: medication_adherence_pdc
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "between 0 and 1"
+      - name: is_readmitted_30d
+        data_tests: [not_null]
+
+      # ---------------------------------------------------- patient flow
+      - name: triaged_at
+        data_tests: [not_null]
+      - name: admitted_at
+        data_tests: [not_null]
+      - name: bed_requested_at
+        data_tests: [not_null]
+      - name: bed_assigned_at
+        data_tests: [not_null]
+      - name: discharged_at
+        data_tests: [not_null]
+      - name: unit_assigned
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: &hospital_units ['ICU', 'MICU', 'SICU', 'Step-Down', 'Cardiac', 'Oncology', 'Ortho', 'General', 'Med-Surg A', 'Med-Surg B']
+              config:
+                severity: warn
+      - name: bed_occupancy_pct
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "between 0 and 100"
+      - name: los_days
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: ">= 0"
+
+      # ---------------------------------------------- procedure / OR
+      - name: cpt_code
+        data_tests: [not_null]
+      - name: procedure_display
+        data_tests: [not_null]
+      - name: or_started_at
+        data_tests: [not_null]
+      - name: or_ended_at
+        data_tests: [not_null]
+      - name: actual_or_minutes
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "> 0"
+      - name: or_turnover_minutes
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: ">= 0"
+
+      # -------------------------------------------------- patient safety
+      - name: has_safety_incident
+        data_tests: [not_null]
+      - name: incident_type          # NULL when there is no incident
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['Fall', 'Medication Error', 'Pressure Injury', 'CAUTI', 'CLABSI', 'SSI', 'Equipment Failure', 'Delay in Care', 'Near-Miss']
+              config:
+                severity: warn
+      - name: incident_severity      # NULL when there is no incident
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['Near-Miss', 'Minor', 'Moderate', 'Major']
+              config:
+                severity: warn
+
+      # ------------------------------------------------- claims & billing
+      - name: payer
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['Medicare', 'Medicaid', 'BlueCross', 'UnitedHealth', 'Cigna', 'Aetna', 'Self-Pay']
+              config:
+                severity: warn
+      - name: npi_billing             # NPI = exactly 10 digits
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "like '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'"
+      - name: drg_weight
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "> 0"
+      - name: submitted_charge_usd
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: ">= 0"
+      - name: allowed_amount_usd
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: ">= 0"
+      - name: patient_responsibility_usd
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: ">= 0"
+      - name: is_fraud_upcoding
+        data_tests: [not_null]
+      - name: is_fraud_duplicate
+        data_tests: [not_null]
+      - name: is_fraud_unbundling
+        data_tests: [not_null]
+
+      # -------------------------------------------------------- staffing
+      - name: nurse_emp_id
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "like 'NRS-[0-9]%'"
+      - name: nurse_role
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['RN', 'Charge RN', 'LPN']
+              config:
+                severity: warn
+      - name: nurse_unit
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: *hospital_units
+              config:
+                severity: warn
+      - name: nurse_tenure_years
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: ">= 0"
+      - name: nurse_fte
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "> 0 and nurse_fte <= 1"
+      - name: shift_hours
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "between 1 and 24"
+      - name: patients_per_nurse_ratio
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: ">= 1"
+      - name: overtime_hours
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: ">= 0"
+      - name: burnout_exhaustion_mbi
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "between 0 and 6"
+      - name: burnout_cynicism_mbi
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "between 0 and 6"
+      - name: burnout_personal_accomplishment_mbi
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "between 0 and 6"
+      - name: turnover_risk_index
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "between 0 and 1"
+      - name: surgeon_emp_id
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "like 'SRG-[0-9]%'"
+      - name: surgeon_specialty
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['Cardiothoracic', 'General Surgery', 'Neurosurgery', 'Orthopedics', 'Urology']
+              config:
+                severity: warn
+
+      # --------------------------------- CAHPS patient experience (1-5 scale)
+      - name: cahps_nurse_communication
+        data_tests: &cahps_scale
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "between 1 and 5"
+      - name: cahps_doctor_communication
+        data_tests: *cahps_scale
+      - name: cahps_responsiveness
+        data_tests: *cahps_scale
+      - name: cahps_pain_management
+        data_tests: *cahps_scale
+      - name: cahps_discharge_info
+        data_tests: *cahps_scale
+      - name: cahps_care_transition
+        data_tests: *cahps_scale
+      - name: cahps_cleanliness
+        data_tests: *cahps_scale
+      - name: cahps_quietness
+        data_tests: *cahps_scale
+
+      # ------------------------------------------- surgical kit inventory
+      - name: surgical_kit_id
+        data_tests: [not_null]
+      - name: kit_name
+        data_tests: [not_null]
+      - name: kit_unit_cost_usd
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "> 0"
+      - name: kit_current_stock
+        data_tests: &non_negative
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: ">= 0"
+      - name: kit_reorder_point
+        data_tests: *non_negative
+      - name: kit_lead_time_days
+        data_tests: *non_negative
+      - name: kit_expiration_date
+        data_tests: [not_null]
+      - name: is_stockout_risk
+        data_tests: [not_null]
+      - name: weekly_procedure_volume
+        data_tests: *non_negative
+      - name: projected_demand_4wk
+        data_tests: *non_negative
+      - name: days_of_supply
+        data_tests: *non_negative
+
+      # --------------------------------- quality measures & digital maturity
+      - name: is_hedis_hba1c_tested
+        data_tests: [not_null]
+      - name: is_hedis_hba1c_poor_control
+        data_tests: [not_null]
+      - name: pdsa_cycle_id            # optional: mostly NULL by design
+      - name: himss_emram_stage
+        data_tests:
+          - not_null
+          - expression_is_true:
+              arguments:
+                expression: "between 0 and 7"

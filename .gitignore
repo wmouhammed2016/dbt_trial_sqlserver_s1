@@ -4,3 +4,13 @@
 # Ignore the profiles.yml file
 profiles.yml
 .user.yml
+
+# Ignore the data files
+*.csv
+
+# Ignore the dbt logs
+logs/
+*.log
+
+# Ignore the sql dbt test file
+db_test.sql
